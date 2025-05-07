@@ -8,13 +8,14 @@ from PyQt5.QtCore import Qt, QSettings
 from PyQt5.QtGui import QPixmap, QImage, QIcon
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QListWidget, QLabel, QWidget, QPushButton,
-    QFileDialog, QHBoxLayout, QLineEdit, QMessageBox, QCheckBox, QFormLayout, QMenuBar, QAction
+    QFileDialog, QHBoxLayout, QLineEdit, QMessageBox, QCheckBox, QFormLayout, QMenuBar, QAction, QProgressBar,
+    QMenu, QSpinBox, QPlainTextEdit, QComboBox, QDialog, QDialogButtonBox
 )
 from pydub import AudioSegment
 from mutagen.flac import FLAC, Picture
 from mutagen.mp3 import MP3, EasyMP3
-from mutagen.id3 import APIC, ID3
 import base64
+import platform
 
 APP_NAME = "Jam Merger"
 APP_VERSION = "1.0"
@@ -24,14 +25,10 @@ BUG_EMAIL = "jbriggs585@gmail.com"
 COFFEE_LINK = "https://buymeacoffee.com/blatchy"
 
 def resource_path(relative_path):
-    """
-    Get absolute path to resource, works for dev and for PyInstaller bundle
-    """
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-# --- Setup ffmpeg path for pydub (bundled ffmpeg.exe support) ---
 def set_ffmpeg():
     ffmpeg_path = resource_path("ffmpeg.exe")
     if os.path.exists(ffmpeg_path):
@@ -39,8 +36,6 @@ def set_ffmpeg():
 
 set_ffmpeg()
 
-# --- Prevent ffmpeg.exe window from flashing (Windows only, PyInstaller safe) ---
-import platform
 if platform.system() == "Windows":
     import subprocess
     import pydub.utils
@@ -109,7 +104,6 @@ class DragDropListWidget(QListWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        # Set the window icon to turtle.ico for toolbar/taskbar
         self.setWindowIcon(QIcon(resource_path("turtle.ico")))
 
         self.setWindowTitle(APP_NAME)
@@ -120,27 +114,44 @@ class MainWindow(QMainWindow):
         self.shortnames_enabled = False
         self.edit_metadata_enabled = False
 
-        # ---------- Menu Bar -----------
-        self.menu_bar = QMenuBar(self)
-        about_menu = self.menu_bar.addMenu("&About")
+        # Custom Description Settings
+        self.custom_description = self.settings.value("custom_description_text", "", type=str)
+        self.custom_description_enabled = self.settings.value("custom_description_enabled", False, type=bool)
 
-        # Suggestions/Report a Bug
+        # Menu bar: Settings first, About last (rightmost)
+        self.menu_bar = QMenuBar(self)
+        self.settings_menu = QMenu("&Settings", self)
+        self.menu_bar.addMenu(self.settings_menu)
+        self.about_menu = self.menu_bar.addMenu("&About")
+        self.setMenuBar(self.menu_bar)
+
+        # Settings Actions
+        self.show_progress_action = QAction("Show Progress Bar", self, checkable=True)
+        self.show_progress_action.setChecked(self.settings.value("show_progress_bar", True, type=bool))
+        self.show_progress_action.triggered.connect(self.toggle_progress_bar_setting)
+
+        self.show_success_popup_action = QAction("Show Success Popup", self, checkable=True)
+        self.show_success_popup_action.setChecked(self.settings.value("show_success_popup", True, type=bool))
+        self.show_success_popup_action.triggered.connect(self.toggle_success_popup_setting)
+
+        self.custom_description_action = QAction("Custom Description", self, checkable=True)
+        self.custom_description_action.setChecked(self.custom_description_enabled)
+        self.custom_description_action.triggered.connect(self.toggle_custom_description_dialog)
+
+        self.settings_menu.addAction(self.show_progress_action)
+        self.settings_menu.addAction(self.show_success_popup_action)
+        self.settings_menu.addAction(self.custom_description_action)
+
+        # About menu actions (rightmost)
         self.bug_action = QAction("Suggestions / Report a Bug", self)
         self.bug_action.triggered.connect(self.send_bug_email)
-        about_menu.addAction(self.bug_action)
-
-        # About
+        self.about_menu.addAction(self.bug_action)
         self.about_action = QAction("About", self)
         self.about_action.triggered.connect(self.show_about_dialog)
-        about_menu.addAction(self.about_action)
-
-        # Buy Me a Coffee
+        self.about_menu.addAction(self.about_action)
         self.coffee_action = QAction("Buy Me a Coffee", self)
         self.coffee_action.triggered.connect(self.open_coffee_link)
-        about_menu.addAction(self.coffee_action)
-
-        self.setMenuBar(self.menu_bar)
-        # ---------- End Menu Bar -----------
+        self.about_menu.addAction(self.coffee_action)
 
         self.central_widget = QWidget()
         self.main_layout = QVBoxLayout(self.central_widget)
@@ -153,7 +164,6 @@ class MainWindow(QMainWindow):
         self.list_widget.setMaximumHeight(200)
         self.main_layout.addWidget(self.list_widget)
 
-        # Metadata/artwork
         self.album_art_label = QLabel()
         self.album_art_label.setFixedSize(100, 100)
         self.album_art_label.setStyleSheet("border: 1px solid gray;")
@@ -195,15 +205,57 @@ class MainWindow(QMainWindow):
         self.metadata_artwork_layout.addLayout(artwork_vbox)
         self.main_layout.addLayout(self.metadata_artwork_layout)
 
-        # Short Names Checkbox
         self.shortnames_checkbox = QCheckBox("Short Names")
         self.shortnames_checkbox.stateChanged.connect(self.toggle_shortnames)
         self.main_layout.addWidget(self.shortnames_checkbox)
 
-        # Edit Metadata Checkbox
         self.edit_metadata_checkbox = QCheckBox("Edit Metadata")
         self.edit_metadata_checkbox.stateChanged.connect(self.toggle_edit_metadata)
         self.main_layout.addWidget(self.edit_metadata_checkbox)
+
+        self.omit_special_checkbox = QCheckBox("Omit Drums/Space/Rhythm Devils")
+        self.omit_special_checkbox.setChecked(False)
+        self.main_layout.addWidget(self.omit_special_checkbox)
+
+        self.fade_last_checkbox = QCheckBox("Fade last song")
+        self.fade_last_checkbox.setChecked(False)
+
+        self.fade_last_spinbox = QSpinBox()
+        self.fade_last_spinbox.setMinimum(0)
+        self.fade_last_spinbox.setMaximum(30)
+        self.fade_last_spinbox.setValue(self.settings.value("fade_last_seconds", 2, type=int))
+        self.fade_last_spinbox.setSuffix(" s")
+        self.fade_last_spinbox.setEnabled(self.fade_last_checkbox.isChecked())
+        self.fade_last_spinbox.valueChanged.connect(self.save_fade_last_setting)
+
+        fade_hbox = QHBoxLayout()
+        fade_hbox.addWidget(self.fade_last_checkbox)
+        fade_hbox.addWidget(self.fade_last_spinbox)
+        fade_hbox.addStretch()
+        self.main_layout.addLayout(fade_hbox)
+        self.fade_last_checkbox.stateChanged.connect(
+            lambda checked: self.fade_last_spinbox.setEnabled(checked)
+        )
+
+        self.omit_special_checkbox.stateChanged.connect(self.handle_omit_special_changed)
+        self.handle_omit_special_changed()
+
+        # --- Conversion checkbox and dropdown for merged files ---
+        self.convert_checkbox = QCheckBox("Convert merged files to:")
+        self.convert_checkbox.setChecked(False)
+        self.convert_format_combo = QComboBox()
+        self.convert_format_combo.addItems([
+            "FLAC", "WAV", "MP3 320", "MP3 256", "MP3 128"
+        ])
+        self.convert_format_combo.setEnabled(False)
+        convert_hbox = QHBoxLayout()
+        convert_hbox.addWidget(self.convert_checkbox)
+        convert_hbox.addWidget(self.convert_format_combo)
+        convert_hbox.addStretch()
+        self.main_layout.addLayout(convert_hbox)
+        self.convert_checkbox.stateChanged.connect(
+            lambda checked: self.convert_format_combo.setEnabled(checked)
+        )
 
         self.add_files_button = QPushButton("Add Files")
         self.add_files_button.clicked.connect(self.open_file_dialog)
@@ -228,15 +280,72 @@ class MainWindow(QMainWindow):
         self.save_directory_label = QLabel("Save Directory: Not Selected")
         self.main_layout.addWidget(self.save_directory_label)
 
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(self.show_progress_action.isChecked())
+        self.main_layout.addWidget(self.progress_bar)
+
         self.list_widget.itemChanged.connect(self.update_file_name_preview)
         self.setCentralWidget(self.central_widget)
         self.load_last_directories()
 
-        # Internal: hold artwork image data and mime
         self.artwork_data = None
         self.artwork_mime = None
 
-    # -------- Menu Actions --------
+        self.metadata_widgets = [
+            self.file_name_preview_edit, self.title_edit, self.artist_edit,
+            self.album_edit, self.year_edit, self.genre_edit, self.album_artist_edit
+        ]
+        self.toggle_edit_metadata()
+
+    def save_fade_last_setting(self):
+        self.settings.setValue("fade_last_seconds", self.fade_last_spinbox.value())
+
+    def toggle_progress_bar_setting(self):
+        show = self.show_progress_action.isChecked()
+        self.settings.setValue("show_progress_bar", show)
+        self.progress_bar.setVisible(show)
+
+    def toggle_success_popup_setting(self):
+        show = self.show_success_popup_action.isChecked()
+        self.settings.setValue("show_success_popup", show)
+
+    def handle_omit_special_changed(self):
+        pass
+
+    def toggle_custom_description_dialog(self):
+        checked = self.custom_description_action.isChecked()
+        if checked:
+            desc, ok = self.get_description_from_user()
+            if ok:
+                self.custom_description = desc
+                self.custom_description_enabled = True
+                self.settings.setValue("custom_description_text", desc)
+                self.settings.setValue("custom_description_enabled", True)
+            else:
+                self.custom_description_action.setChecked(False)
+        else:
+            self.custom_description_enabled = False
+            self.settings.setValue("custom_description_enabled", False)
+
+    def get_description_from_user(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Custom Description")
+        layout = QVBoxLayout(dialog)
+        label = QLabel("Enter a custom description to be embedded as metadata in every merged file:")
+        layout.addWidget(label)
+        edit = QPlainTextEdit()
+        edit.setPlainText(self.custom_description)
+        layout.addWidget(edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        result = dialog.exec_()
+        return edit.toPlainText(), result == QDialog.Accepted
+
     def send_bug_email(self):
         subject = f"{APP_NAME} Suggestion / Bug Report"
         body = "Please describe your suggestion or the bug you encountered:\n"
@@ -255,7 +364,6 @@ class MainWindow(QMainWindow):
 
     def open_coffee_link(self):
         webbrowser.open(COFFEE_LINK)
-    # -------- End Menu Actions --------
 
     def load_song_list(self):
         song_file_path = resource_path("songs.txt")
@@ -282,21 +390,40 @@ class MainWindow(QMainWindow):
             print(f"Could not load shortnames list: {e}")
             return {}
 
+    def normalize_title(self, title):
+        title = title.lower()
+        title = title.replace("feeling", "feelin'")
+        title = title.replace("feelin", "feelin'")
+        title = re.sub(r"[^\w\s]", "", title)
+        title = title.replace(" ", "")
+        return title
+
     def extract_song_title(self, raw_title):
         cleaned = re.sub(r"^(?:\d+-)?\d+\s*", "", raw_title)
         cleaned = cleaned.replace("_", " ").replace("-", " ").strip()
-        matches = difflib.get_close_matches(cleaned, self.song_list, n=1, cutoff=0.6)
-        if matches:
-            matched_full_title = matches[0]
-            key = matched_full_title.lower()
-            if self.shortnames_enabled and key in self.shortname_map:
-                return self.shortname_map[key]
+        cleaned_norm = self.normalize_title(cleaned)
+
+        norm_song_map = {self.normalize_title(song): song for song in self.song_list}
+        norm_shortname_map = {self.normalize_title(full): short for full, short in self.shortname_map.items()}
+
+        if cleaned_norm in norm_song_map:
+            full_title = norm_song_map[cleaned_norm]
+            short_key = self.normalize_title(full_title)
+            if self.shortnames_enabled and short_key in norm_shortname_map:
+                return norm_shortname_map[short_key]
             else:
-                return matched_full_title
-        for song in self.song_list:
-            if cleaned.lower() == song.lower():
-                key = song.lower()
-                return self.shortname_map[key] if self.shortnames_enabled and key in self.shortname_map else song
+                return full_title
+
+        matches = difflib.get_close_matches(cleaned_norm, norm_song_map.keys(), n=1, cutoff=0.6)
+        if matches:
+            matched_key = matches[0]
+            full_title = norm_song_map[matched_key]
+            short_key = self.normalize_title(full_title)
+            if self.shortnames_enabled and short_key in norm_shortname_map:
+                return norm_shortname_map[short_key]
+            else:
+                return full_title
+
         return cleaned
 
     def toggle_shortnames(self):
@@ -306,16 +433,19 @@ class MainWindow(QMainWindow):
 
     def toggle_edit_metadata(self):
         self.edit_metadata_enabled = self.edit_metadata_checkbox.isChecked()
-        # Toggle editability for all fields
-        for widget in [
-            self.file_name_preview_edit, self.title_edit, self.artist_edit,
-            self.album_edit, self.year_edit, self.genre_edit, self.album_artist_edit
-        ]:
+        for widget in self.metadata_widgets:
             widget.setReadOnly(not self.edit_metadata_enabled)
         self.change_artwork_button.setEnabled(self.edit_metadata_enabled)
         if not self.edit_metadata_enabled:
+            for widget in self.metadata_widgets:
+                widget.setStyleSheet("background-color: #dddddd; color: #888888;")
+            self.album_art_label.setStyleSheet("border: 1px solid gray; background-color: #dddddd;")
             self.update_file_name_preview()
             self.update_combined_metadata()
+        else:
+            for widget in self.metadata_widgets:
+                widget.setStyleSheet("")
+            self.album_art_label.setStyleSheet("border: 1px solid gray;")
 
     def open_file_dialog(self):
         last_dir = self.settings.value("last_add_files_dir", "")
@@ -363,9 +493,16 @@ class MainWindow(QMainWindow):
         self.album_artist_edit.clear()
         self.artwork_data = None
         self.artwork_mime = None
+        if self.edit_metadata_checkbox.isChecked():
+            self.edit_metadata_checkbox.setChecked(False)
+        if self.omit_special_checkbox.isChecked():
+            self.omit_special_checkbox.setChecked(False)
+        if self.fade_last_checkbox.isChecked():
+            self.fade_last_checkbox.setChecked(False)
+        self.handle_omit_special_changed()
+        self.toggle_edit_metadata()
 
     def update_file_name_preview(self):
-        # If editing is enabled, do not auto-update so user can type
         if self.edit_metadata_enabled:
             return
         song_titles = []
@@ -381,7 +518,6 @@ class MainWindow(QMainWindow):
         self.file_name_preview_edit.setText(proposed_name)
 
     def update_combined_metadata(self):
-        # Do not auto-update if editing is enabled, except on clear
         if self.edit_metadata_enabled:
             return
         combined_titles = []
@@ -427,6 +563,9 @@ class MainWindow(QMainWindow):
                 song_title = self.extract_song_title(file_name)
                 combined_titles.append(song_title)
         combined_title = " > ".join(combined_titles)
+        if artist and isinstance(artist, str) and artist.strip().lower() == "grateful dead":
+            genre = "Rock"
+            album_artist = "Grateful Dead"
         artist = artist or "Unknown Artist"
         album = album or "Unknown Album"
         year = year or "Unknown Year"
@@ -477,6 +616,86 @@ class MainWindow(QMainWindow):
             date_str = mod_time.strftime('%Y-%m-%d')
         return date_str
 
+    def has_artwork(self, file_path):
+        try:
+            if file_path.lower().endswith('.mp3'):
+                audio_file = MP3(file_path)
+                for tag in audio_file.tags.values():
+                    if hasattr(tag, 'FrameID') and tag.FrameID == "APIC":
+                        return True
+            elif file_path.lower().endswith('.flac'):
+                audio_file = FLAC(file_path)
+                if hasattr(audio_file, "pictures") and len(audio_file.pictures) > 0:
+                    return True
+                elif "metadata_block_picture" in audio_file:
+                    return True
+        except Exception as e:
+            print(f"Error checking artwork: {e}")
+        return False
+
+    def any_file_has_artwork(self):
+        for file_path in self.list_widget.full_paths:
+            if self.has_artwork(file_path):
+                return True
+        return False
+
+    def is_track_order_suspicious(self):
+        track_numbers = []
+        titles = []
+        for file_path in self.list_widget.full_paths:
+            num = None
+            title = None
+            try:
+                if file_path.lower().endswith('.flac'):
+                    audio = FLAC(file_path)
+                    num = audio.get('tracknumber', [None])[0]
+                    title = audio.get('title', [None])[0]
+                elif file_path.lower().endswith('.mp3'):
+                    audio = MP3(file_path)
+                    num = audio.get('TRCK', None)
+                    if num:
+                        num = num.text[0].split('/')[0]
+                    title = audio.get('TIT2', None)
+                    if title:
+                        title = title.text[0]
+            except Exception:
+                pass
+            if not num:
+                basename = os.path.basename(file_path)
+                m = re.match(r"^(\d+)", basename)
+                if m:
+                    num = m.group(1)
+            track_numbers.append(int(num) if num and str(num).isdigit() else None)
+            titles.append(title or os.path.basename(file_path))
+
+        track_nums = [n for n in track_numbers if n is not None]
+        if len(track_nums) >= 2:
+            if track_nums != sorted(track_nums):
+                return True
+        if len(titles) >= 2:
+            file_names = [os.path.basename(f) for f in self.list_widget.full_paths]
+            if file_names != sorted(file_names):
+                return True
+        return False
+
+    def warn_tracks_out_of_order(self):
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Possible Track Order Issue")
+        msg.setText("Warning: The files you have added appear to be out of order by track number or filename.\nProceed anyway?")
+        msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        msg.setDefaultButton(QMessageBox.Cancel)
+        return msg.exec_() == QMessageBox.Ok
+
+    def warn_no_artwork_dialog(self):
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("No Album Artwork Detected")
+        msg.setText("Warning: No album artwork detected in the metadata of any file in your selection.\nProceed anyway?")
+        msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        msg.setDefaultButton(QMessageBox.Cancel)
+        return msg.exec_() == QMessageBox.Ok
+
     def process_files(self):
         if self.list_widget.count() == 0:
             print("No files to process!")
@@ -486,73 +705,169 @@ class MainWindow(QMainWindow):
             print("Save directory not selected!")
             return
 
-        # Use user-edited values if editing enabled, otherwise current preview
+        # Warn if track order looks suspicious
+        if self.is_track_order_suspicious():
+            if not self.warn_tracks_out_of_order():
+                self.progress_bar.setVisible(False)
+                self.progress_bar.setValue(0)
+                return
+
+        # Warn if none of the files have album art
+        if not self.any_file_has_artwork():
+            if not self.warn_no_artwork_dialog():
+                self.progress_bar.setVisible(False)
+                self.progress_bar.setValue(0)
+                return
+
         proposed_file_name = self.file_name_preview_edit.text() if self.edit_metadata_enabled else self.get_auto_proposed_filename()
+
+        # --- Conversion logic for merged file ---
+        output_format = None
+        bitrate = None
         first_file = self.list_widget.full_paths[0]
-        file_extension = os.path.splitext(first_file)[1].lower()
+        if self.convert_checkbox.isChecked():
+            fmt = self.convert_format_combo.currentText()
+            if fmt == "FLAC":
+                file_extension = ".flac"
+                output_format = "flac"
+            elif fmt == "WAV":
+                file_extension = ".wav"
+                output_format = "wav"
+            elif fmt == "MP3 320":
+                file_extension = ".mp3"
+                output_format = "mp3"
+                bitrate = "320k"
+            elif fmt == "MP3 256":
+                file_extension = ".mp3"
+                output_format = "mp3"
+                bitrate = "256k"
+            elif fmt == "MP3 128":
+                file_extension = ".mp3"
+                output_format = "mp3"
+                bitrate = "128k"
+        else:
+            file_extension = os.path.splitext(first_file)[1].lower()
+            output_format = file_extension[1:]
 
         date_str = self.extract_date_for_filename(first_file)
-        match = re.match(r'^(.*) \(\d{4}-\d{2}-\d{2}\)$', proposed_file_name)
-        if match:
-            core_name = match.group(1)
-        else:
-            core_name = proposed_file_name
-        proposed_file_name_with_date = f"{core_name} ({date_str})"
 
-        output_path = os.path.join(save_directory, proposed_file_name_with_date + file_extension)
+        total_files = len(self.list_widget.full_paths)
+        self.progress_bar.setMaximum(total_files)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(self.show_progress_action.isChecked())
+        fade_duration = self.fade_last_spinbox.value() * 1000  # ms
+
+        def get_titles_and_paths():
+            titles = []
+            for i in range(self.list_widget.count()):
+                item_text = self.list_widget.item(i).text()
+                file_name = item_text.split("/")[-1].rsplit(".", 1)[0]
+                song_title = self.extract_song_title(file_name)
+                titles.append(song_title)
+            return titles, list(self.list_widget.full_paths)
+
+        # Omit Drums/Space/Rhythm Devils logic
+        if self.omit_special_checkbox.isChecked():
+            titles, paths = get_titles_and_paths()
+            special_names = ["drums", "space", "rhythm devils"]
+            omitted_indices = [i for i, t in enumerate(titles)
+                               if any(s in t.lower() for s in special_names)]
+            if omitted_indices:
+                first_omit = omitted_indices[0]
+                last_omit = omitted_indices[-1]
+                before_titles = titles[:first_omit]
+                before_paths = paths[:first_omit]
+                after_titles = titles[last_omit + 1:]
+                after_paths = paths[last_omit + 1:]
+
+                if before_paths:
+                    merged_audio = None
+                    for idx, file_path in enumerate(before_paths):
+                        audio = AudioSegment.from_file(file_path)
+                        merged_audio = audio if merged_audio is None else merged_audio + audio
+                        if self.show_progress_action.isChecked():
+                            self.progress_bar.setValue(idx + 1)
+                            QApplication.processEvents()
+                    output_name = " - ".join(before_titles) + f" ({date_str}){file_extension}"
+                    output_path = os.path.join(save_directory, output_name)
+                    self.export_merged_file(merged_audio, output_path, file_extension, " > ".join(before_titles), output_format, bitrate)
+                    self.show_success_dialog(output_path)
+                if after_paths:
+                    merged_audio = None
+                    for idx, file_path in enumerate(after_paths):
+                        audio = AudioSegment.from_file(file_path)
+                        # Only fade out last song of after_paths if fade is enabled
+                        if (
+                            self.fade_last_checkbox.isChecked()
+                            and fade_duration > 0
+                            and idx == len(after_paths) - 1
+                        ):
+                            audio = audio.fade_out(fade_duration)
+                        merged_audio = audio if merged_audio is None else merged_audio + audio
+                        if self.show_progress_action.isChecked():
+                            self.progress_bar.setValue(len(before_paths) + idx + 1)
+                            QApplication.processEvents()
+                    output_name = " - ".join(after_titles) + f" ({date_str}){file_extension}"
+                    output_path = os.path.join(save_directory, output_name)
+                    self.export_merged_file(merged_audio, output_path, file_extension, " > ".join(after_titles), output_format, bitrate)
+                    self.show_success_dialog(output_path)
+                self.progress_bar.setVisible(False)
+                self.progress_bar.setValue(0)
+                return
+
+        # Standard merging (no omit or no matches)
         merged_audio = None
-
-        # Use selected artwork if any, else extract from first file
-        album_art_data = self.artwork_data
-        album_art_mime = self.artwork_mime
-        if not (album_art_data and album_art_mime) and self.list_widget.full_paths:
-            try:
-                if first_file.lower().endswith('.mp3'):
-                    audio_file = MP3(first_file)
-                    for tag in audio_file.tags.values():
-                        if hasattr(tag, 'FrameID') and tag.FrameID == "APIC":
-                            album_art_data = tag.data
-                            album_art_mime = tag.mime
-                            break
-                elif first_file.lower().endswith('.flac'):
-                    audio_file = FLAC(first_file)
-                    if hasattr(audio_file, "pictures") and len(audio_file.pictures) > 0:
-                        picture = audio_file.pictures[0]
-                        album_art_data = picture.data
-                        album_art_mime = picture.mime
-                    elif "metadata_block_picture" in audio_file:
-                        try:
-                            picture = Picture(base64.b64decode(audio_file["metadata_block_picture"][0]))
-                        except Exception:
-                            picture = Picture(audio_file["metadata_block_picture"][0].encode())
-                        album_art_data = picture.data
-                        album_art_mime = picture.mime
-            except Exception as e:
-                print(f"Error extracting album art from the first file: {e}")
-
-        for file_path in self.list_widget.full_paths:
+        for idx, file_path in enumerate(self.list_widget.full_paths):
             try:
                 audio = AudioSegment.from_file(file_path)
-                if merged_audio is None:
-                    merged_audio = audio
-                else:
-                    merged_audio += audio
+                # Only fade last song if enabled and fade duration > 0
+                if (
+                    self.fade_last_checkbox.isChecked()
+                    and fade_duration > 0
+                    and idx == self.list_widget.count() - 1
+                ):
+                    audio = audio.fade_out(fade_duration)
+                merged_audio = audio if merged_audio is None else merged_audio + audio
+                if self.show_progress_action.isChecked():
+                    self.progress_bar.setValue(idx + 1)
+                    QApplication.processEvents()
             except Exception as e:
                 print(f"Error processing file {file_path}: {e}")
+                self.progress_bar.setVisible(False)
+                self.progress_bar.setValue(0)
                 return
+        proposed_file_name_with_date = proposed_file_name
+        if not proposed_file_name_with_date.endswith(file_extension):
+            proposed_file_name_with_date += file_extension
+        output_path = os.path.join(save_directory, proposed_file_name_with_date)
+        self.export_merged_file(merged_audio, output_path, file_extension, output_format=output_format, bitrate=bitrate)
+        self.show_success_dialog(output_path)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setValue(0)
+
+    def export_merged_file(self, merged_audio, output_path, file_extension, title_override=None, output_format=None, bitrate=None):
         try:
-            merged_audio.export(output_path, format=file_extension[1:])
+            export_kwargs = {}
+            if output_format:
+                export_kwargs["format"] = output_format
+            else:
+                export_kwargs["format"] = file_extension[1:]
+            if bitrate and output_format == "mp3":
+                export_kwargs["bitrate"] = bitrate
+            merged_audio.export(output_path, **export_kwargs)
         except Exception as e:
             print(f"Error exporting merged file: {e}")
             return
         try:
-            # Use user metadata if editing enabled, else from preview fields
-            title_value = self.title_edit.text()
+            title_value = title_override if title_override is not None else self.title_edit.text()
             artist_value = self.artist_edit.text()
             album_value = self.album_edit.text()
             year_value = self.year_edit.text()
             genre_value = self.genre_edit.text()
             album_artist_value = self.album_artist_edit.text()
+            if artist_value.strip().lower() == "grateful dead":
+                genre_value = "Rock"
+                album_artist_value = "Grateful Dead"
             if file_extension == ".flac":
                 merged_file = FLAC(output_path)
                 merged_file["title"] = title_value
@@ -561,16 +876,8 @@ class MainWindow(QMainWindow):
                 merged_file["date"] = year_value
                 merged_file["genre"] = genre_value
                 merged_file["albumartist"] = album_artist_value
-                if album_art_data and album_art_mime:
-                    picture = Picture()
-                    picture.data = album_art_data
-                    picture.type = 3
-                    picture.mime = album_art_mime
-                    picture.width = 0
-                    picture.height = 0
-                    picture.depth = 0
-                    merged_file.clear_pictures()
-                    merged_file.add_picture(picture)
+                if self.custom_description_enabled and self.custom_description:
+                    merged_file["description"] = self.custom_description
                 merged_file.save()
             elif file_extension == ".mp3":
                 merged_file = EasyMP3(output_path)
@@ -580,23 +887,11 @@ class MainWindow(QMainWindow):
                 merged_file["date"] = year_value
                 merged_file["genre"] = genre_value
                 merged_file["albumartist"] = album_artist_value
+                if self.custom_description_enabled and self.custom_description:
+                    merged_file["comment"] = self.custom_description
                 merged_file.save()
-                if album_art_data and album_art_mime:
-                    id3_tags = ID3(output_path)
-                    id3_tags.delall("APIC")
-                    id3_tags.add(
-                        APIC(
-                            mime=album_art_mime,
-                            type=3,
-                            desc="Cover",
-                            data=album_art_data,
-                        )
-                    )
-                    id3_tags.save(v2_version=3)
         except Exception as e:
             print(f"Error adding metadata: {e}")
-            return
-        self.show_success_dialog(output_path)
 
     def get_auto_proposed_filename(self):
         song_titles = []
@@ -612,16 +907,18 @@ class MainWindow(QMainWindow):
         return proposed_name
 
     def show_success_dialog(self, output_path):
+        if not self.show_success_popup_action.isChecked():
+            return
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Information)
         msg.setWindowTitle("Processing Complete")
         msg.setText("The merged file has been successfully created!")
-        msg.setInformativeText(f"File saved to:\n{output_path}")
+        filename = os.path.basename(output_path)
+        msg.setInformativeText(f"File saved: {filename}")
         msg.setStandardButtons(QMessageBox.Ok)
         msg.exec_()
 
     def update_album_art(self):
-        # If editing and user has selected artwork, keep that; else use from first file
         if self.edit_metadata_enabled and self.artwork_data and self.artwork_mime:
             image = QImage.fromData(self.artwork_data)
             if not image.isNull():
@@ -634,7 +931,6 @@ class MainWindow(QMainWindow):
         self.artwork_data = None
         self.artwork_mime = None
 
-        # Get album art from first file
         for file_path in self.list_widget.full_paths:
             try:
                 if file_path.lower().endswith('.mp3'):
@@ -676,7 +972,6 @@ class MainWindow(QMainWindow):
             selected_file = file_dialog.selectedFiles()[0]
             with open(selected_file, "rb") as f:
                 data = f.read()
-            # Determine mime type
             if selected_file.lower().endswith(".jpg") or selected_file.lower().endswith(".jpeg"):
                 mime = "image/jpeg"
             elif selected_file.lower().endswith(".png"):
